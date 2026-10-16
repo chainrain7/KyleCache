@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package kylecache.pb;
+
+message Request {
+    string group = 1;
+    string key = 2;
+    bytes value = 3;
+}
+
+message GetResponse {
+    bytes value = 1;
+}
+
+message DeleteResponse {
+    bool value = 1;
+}
+
+message SetResponse {
+    bool value = 1;
+}
+
+message InvalidateResponse {
+    bool value = 1;
+}
+
+service KyleCache {
+    rpc Get(Request) returns (GetResponse);
+    rpc Set(Request) returns (SetResponse);
+    rpc Delete(Request) returns (DeleteResponse);
+    rpc Invalidate(Request) returns (InvalidateResponse);
+}

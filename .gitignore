@@ -1,0 +1,18 @@
+# Xmake cache
+.xmake/
+
+build/
+bin/
+CMakeUserPresets.json
+
+# MacOS Cache
+.DS_Store
+
+# Vscode Cache
+.vscode/
+
+# gRPC and Protobuf
+*.pb.cc
+*.pb.h
+*.grpc.pb.cc
+*.grpc.pb.h

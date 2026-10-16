@@ -1,0 +1,43 @@
+services:
+  kylecache-etcd:
+    image: quay.io/coreos/etcd:v3.5.0
+    container_name: kylecache-etcd
+    network_mode: host
+    environment:
+      - ETCD_ADVERTISE_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+
+  kylecache-node-a:
+    image: kylecache:latest
+    container_name: kylecache-node-a
+    network_mode: host
+    depends_on:
+      - kylecache-etcd
+    command: ["/app/bin/node_server", "--port=8001", "--node=A", "--etcd_endpoints=http://localhost:2379"]
+
+  kylecache-node-b:
+    image: kylecache:latest
+    container_name: kylecache-node-b
+    network_mode: host
+    depends_on:
+      - kylecache-etcd
+    command: ["/app/bin/node_server", "--port=8002", "--node=B", "--etcd_endpoints=http://localhost:2379"]
+
+  kylecache-node-c:
+    image: kylecache:latest
+    container_name: kylecache-node-c
+    network_mode: host
+    depends_on:
+      - kylecache-etcd
+    command: ["/app/bin/node_server", "--port=8003", "--node=C", "--etcd_endpoints=http://localhost:2379"]
+
+  kylecache-gateway:
+    image: kylecache:latest
+    container_name: kylecache-gateway
+    network_mode: host
+    depends_on:
+      - kylecache-etcd
+      - kylecache-node-a
+      - kylecache-node-b
+      - kylecache-node-c
+    command: ["/app/bin/http_gateway", "--http_port=9000", "--etcd_endpoints=http://localhost:2379"]
