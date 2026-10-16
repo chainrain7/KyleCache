@@ -1,6 +1,9 @@
 #include "kylecache/consistent_hash.h"
 
+#include <algorithm>
+#include <cmath>
 #include <mutex>
+#include <unordered_set>
 
 #include <fmt/base.h>
 #include <fmt/format.h>
@@ -50,7 +53,10 @@ uint32_t Crc32IEEE(const std::string& data) {
 }
 
 ConsistentHashMap::ConsistentHashMap(HashConfig cfg) : config_(cfg), total_requests_(0), is_balancer_stop_(false) {
-    StartBalancer();  // 启动负载均衡器
+    // 负载自均衡默认关闭：动态调整虚拟节点会破坏 key -> 节点路由的稳定性
+    if (config_.enable_load_balance) {
+        StartBalancer();
+    }
 }
 
 ConsistentHashMap::~ConsistentHashMap() {
@@ -129,12 +135,50 @@ auto ConsistentHashMap::Get(const std::string& key) -> std::string {
         it = keys_.begin();
     }
 
-    std::string node = hash_map_[*it];
+    // 读锁下不能使用 operator[]：它具备插入语义，可能修改容器结构
+    auto node_it = hash_map_.find(*it);
+    if (node_it == hash_map_.end()) {
+        return "";
+    }
     // 增加节点计数和总请求数，这里使用原子操作
-    ++node_counts_[node];
+    if (auto count_it = node_counts_.find(node_it->second); count_it != node_counts_.end()) {
+        ++count_it->second;
+    }
     ++total_requests_;
 
-    return node;
+    return node_it->second;
+}
+
+auto ConsistentHashMap::GetN(const std::string& key, int n) -> std::vector<std::string> {
+    std::vector<std::string> nodes;
+    if (key.empty() || n <= 0) {
+        return nodes;
+    }
+
+    std::shared_lock lock{mtx_};
+    if (keys_.empty()) {
+        return nodes;
+    }
+
+    uint32_t hash = config_.hash_func(key);
+    auto it = std::lower_bound(keys_.begin(), keys_.end(), hash);
+    if (it == keys_.end()) {
+        it = keys_.begin();
+    }
+
+    // 沿哈希环顺时针收集 n 个不同的节点作为候选（故障转移用），不重复计数
+    std::unordered_set<std::string> seen;
+    for (size_t i = 0; i < keys_.size() && static_cast<int>(seen.size()) < n; ++i) {
+        if (auto node_it = hash_map_.find(*it); node_it != hash_map_.end()) {
+            if (seen.insert(node_it->second).second) {
+                nodes.push_back(node_it->second);
+            }
+        }
+        if (++it == keys_.end()) {
+            it = keys_.begin();
+        }
+    }
+    return nodes;
 }
 
 auto ConsistentHashMap::GetStats() -> std::unordered_map<std::string, double> {

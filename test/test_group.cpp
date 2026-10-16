@@ -18,12 +18,12 @@ protected:
         db_ = {{"key1", "value1"}, {"key2", "value2"}, {"key3", "value3"}};
         call_count_.clear();
 
-        getter_ = [this](const std::string& key) -> ByteViewOptional {
+        getter_ = [this](const std::string& key) -> CacheValueOptional {
             // 统计回源调用次数
             call_count_[key]++;
             auto it = db_.find(key);
             if (it != db_.end()) {
-                return ByteView{it->second};
+                return CacheValue{it->second};
             }
             return std::nullopt;
         };
@@ -62,7 +62,7 @@ TEST_F(CacheGroupTest, GetReturnsNulloptForMissing) {
 TEST_F(CacheGroupTest, SetThenGetDoesNotCallGetter) {
     KyleCacheGroup group("group_set", 1024, getter_);
 
-    EXPECT_TRUE(group.Set("manual", ByteView{"v"}));
+    EXPECT_TRUE(group.Set("manual", CacheValue{"v"}));
     auto r = group.Get("manual");
     ASSERT_TRUE(r.has_value());
     EXPECT_EQ(r->ToString(), "v");
@@ -104,7 +104,7 @@ TEST_F(CacheGroupTest, EmptyKeyIsRejected) {
     KyleCacheGroup group("group_empty", 1024, getter_);
 
     EXPECT_FALSE(group.Get("").has_value());
-    EXPECT_FALSE(group.Set("", ByteView{"x"}));
+    EXPECT_FALSE(group.Set("", CacheValue{"x"}));
     EXPECT_FALSE(group.Delete(""));
     EXPECT_FALSE(group.InvalidateFromPeer(""));
 }
@@ -112,11 +112,11 @@ TEST_F(CacheGroupTest, EmptyKeyIsRejected) {
 // 多线程并发对同一 key 的 Get，只回源一次，其它线程复用结果
 TEST_F(CacheGroupTest, SingleFlightAvoidsDuplicateLoads) {
     // getter 增加少量延迟，放大并发窗口
-    DataGetter slow_getter = [this](const std::string& key) -> ByteViewOptional {
+    DataGetter slow_getter = [this](const std::string& key) -> CacheValueOptional {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         call_count_[key]++;
         auto it = db_.find(key);
-        if (it != db_.end()) return ByteView{it->second};
+        if (it != db_.end()) return CacheValue{it->second};
         return std::nullopt;
     };
 
@@ -182,9 +182,9 @@ TEST_F(CacheGroupTest, BatchGetAcrossKeys) {
 // 全局方法测试
 TEST(CacheGroupGlobalTest, MakeCacheGroupCreatesUsableGroup) {
     std::unordered_map<std::string, std::string> db = {{"gkey", "gvalue"}};
-    auto getter = [&db](const std::string& key) -> ByteViewOptional {
+    auto getter = [&db](const std::string& key) -> CacheValueOptional {
         auto it = db.find(key);
-        if (it != db.end()) return ByteView{it->second};
+        if (it != db.end()) return CacheValue{it->second};
         return std::nullopt;
     };
 
@@ -195,7 +195,7 @@ TEST(CacheGroupGlobalTest, MakeCacheGroupCreatesUsableGroup) {
 }
 
 TEST(CacheGroupGlobalTest, GetCacheGroupLookup) {
-    auto getter = [](const std::string&) -> ByteViewOptional { return std::nullopt; };
+    auto getter = [](const std::string&) -> CacheValueOptional { return std::nullopt; };
     MakeCacheGroup("lookup_group", 512, getter);
 
     auto* found = GetCacheGroup("lookup_group");
@@ -207,12 +207,12 @@ TEST(CacheGroupGlobalTest, GetCacheGroupLookup) {
 
 // 不同名称的 group 相互独立，交叉访问失败
 TEST(CacheGroupGlobalTest, MultipleNamedGroupsAreIndependent) {
-    auto getter1 = [](const std::string& key) -> ByteViewOptional {
-        if (key == "k1") return ByteView{"v1"};
+    auto getter1 = [](const std::string& key) -> CacheValueOptional {
+        if (key == "k1") return CacheValue{"v1"};
         return std::nullopt;
     };
-    auto getter2 = [](const std::string& key) -> ByteViewOptional {
-        if (key == "k2") return ByteView{"v2"};
+    auto getter2 = [](const std::string& key) -> CacheValueOptional {
+        if (key == "k2") return CacheValue{"v2"};
         return std::nullopt;
     };
 

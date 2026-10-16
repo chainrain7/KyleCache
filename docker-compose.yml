@@ -8,6 +8,7 @@ services:
       - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
 
   kylecache-node-a:
+    build: .
     image: kylecache:latest
     container_name: kylecache-node-a
     network_mode: host

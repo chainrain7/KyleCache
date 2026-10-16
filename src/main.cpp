@@ -1,10 +1,11 @@
 #include <chrono>
 #include <csignal>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
-#include <vector>
+#include <unordered_map>
 
 #include <fmt/base.h>
 #include <fmt/core.h>
@@ -24,6 +25,21 @@ DEFINE_string(group, "default", "缓存组名称");
 DEFINE_string(log_level, "info", "日志级别， 可选值：trace, debug, info, warn, error, critical");
 DEFINE_string(etcd_endpoints, "http://127.0.0.1:2379", "etcd地址");
 
+namespace {
+
+spdlog::level::level_enum ParseLogLevel(const std::string& level) {
+    if (level == "trace") return spdlog::level::trace;
+    if (level == "debug") return spdlog::level::debug;
+    if (level == "info") return spdlog::level::info;
+    if (level == "warn" || level == "warning") return spdlog::level::warn;
+    if (level == "error") return spdlog::level::err;
+    if (level == "critical") return spdlog::level::critical;
+    spdlog::warn("Unknown log level [{}], fallback to info", level);
+    return spdlog::level::info;
+}
+
+}  // namespace
+
 // 模拟数据库
 std::unordered_map<std::string, std::string> db = {
     {"Tom", "400"},     {"Kevin", "370"}, {"Jack", "296"}, {"Alice", "320"}, {"Bob", "280"},
@@ -35,11 +51,22 @@ void HandleCtrlC(int signum) { handler_wrapper(signum); }
 int main(int argc, char** argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-    spdlog::set_level(spdlog::level::debug);
+    spdlog::set_level(ParseLogLevel(FLAGS_log_level));
     spdlog::set_pattern("[knode][%^%l%$] %v");
 
-    std::string addr = "localhost:" + std::to_string(FLAGS_port);
-    std::string service_name = "kylecache";
+    // 先创建缓存组，再启动服务器：避免请求先于 group 到达而返回 Group not found
+    MakeCacheGroup(FLAGS_group, 2 << 20, [&](const std::string& key) -> CacheValueOptional {
+        if (db.find(key) != db.end()) {
+            spdlog::info(">_< search [{}] from db\n", key);
+            return CacheValue{db[key]};
+        }
+        spdlog::info(">_< Uh oh, there is not found [{}]\n", key);
+        return std::nullopt;
+    });
+
+    // 以 ":port" 形式注册，EtcdRegistry 会自动补上本机 IP，保证跨机器可达
+    const std::string addr = ":" + std::to_string(FLAGS_port);
+    const std::string service_name = "kylecache";
     spdlog::info("[node{}] start at: {}", FLAGS_node, addr);
 
     try {
@@ -49,18 +76,7 @@ int main(int argc, char** argv) {
         auto node = std::make_unique<KyleCacheServer>(addr, service_name, opts);
         spdlog::info("[node{}] server created successfully", FLAGS_node);
 
-        // 启动节点
-        std::thread server_thread{[&] {
-            spdlog::info("[node{}] starting service...", FLAGS_node);
-            try {
-                node->Start();
-            } catch (const std::exception& e) {
-                spdlog::info("[node{}] failed to start service: {}", FLAGS_node, e.what());
-                std::exit(1);
-            }
-        }};
-
-        // 注册 Ctrl+C 信号处理器用来优雅关闭服务
+        // 注册 Ctrl+C 信号处理器用来优雅关闭服务（在启动前注册，避免启动期间无法退出）
         handler_wrapper = [&](int signal) {
             if (signal == SIGINT) {
                 spdlog::info("[node{}] received Ctrl+C signal, shutting down service...", FLAGS_node);
@@ -73,17 +89,16 @@ int main(int argc, char** argv) {
         };
         signal(SIGINT, HandleCtrlC);
 
-        std::this_thread::sleep_for(std::chrono::seconds(5));  // 等待服务器启动
-
-        // 创建缓存组
-        auto& group = MakeCacheGroup(FLAGS_group, 2 << 20, [&](const std::string& key) -> ByteViewOptional {
-            if (db.find(key) != db.end()) {
-                spdlog::info(">_< search [{}] from db\n", key);
-                return ByteView{db[key]};
+        // 启动节点
+        std::thread server_thread{[&] {
+            spdlog::info("[node{}] starting service...", FLAGS_node);
+            try {
+                node->Start();
+            } catch (const std::exception& e) {
+                spdlog::info("[node{}] failed to start service: {}", FLAGS_node, e.what());
+                std::exit(1);
             }
-            spdlog::info(">_< Uh oh, there is not found [{}]\n", key);
-            return std::nullopt;
-        });
+        }};
 
         spdlog::info("[node{}] service running, press Ctrl+C to exit...", FLAGS_node);
 

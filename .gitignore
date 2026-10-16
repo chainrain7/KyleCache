@@ -16,3 +16,6 @@ CMakeUserPresets.json
 *.pb.h
 *.grpc.pb.cc
 *.grpc.pb.h
+
+# Agent memory (local only)
+AGENTS.md

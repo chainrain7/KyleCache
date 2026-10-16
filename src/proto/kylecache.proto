@@ -24,9 +24,25 @@ message InvalidateResponse {
     bool value = 1;
 }
 
+message StatsRequest {
+    string group = 1;
+}
+
+message StatsResponse {
+    string group = 1;
+    string node = 2;
+    int64 loads = 3;
+    int64 local_hits = 4;
+    int64 local_misses = 5;
+    int64 loader_hits = 6;
+    int64 loader_errors = 7;
+    int64 load_duration_ns = 8;
+}
+
 service KyleCache {
     rpc Get(Request) returns (GetResponse);
     rpc Set(Request) returns (SetResponse);
     rpc Delete(Request) returns (DeleteResponse);
     rpc Invalidate(Request) returns (InvalidateResponse);
+    rpc Stats(StatsRequest) returns (StatsResponse);
 }

@@ -2,67 +2,94 @@
 
 #include <mutex>
 #include <optional>
+#include <utility>
+#include <vector>
 
 namespace kylecache {
 
-auto LRUCache::Get(const std::string& key) -> ByteViewOptional {
+auto LRUCache::Get(const std::string& key) -> CacheValueOptional {
     std::lock_guard lock{mtx_};
-    if (cache_.find(key) == cache_.end()) {
+    auto it = cache_.find(key);
+    if (it == cache_.end()) {
         return std::nullopt;
     }
-    auto ele = cache_[key];
-    auto [k, value] = *ele;
-    list_.erase(ele);
-    list_.emplace_front(key, value);
-    cache_[key] = list_.begin();
-    return value;
+    // splice 只移动链表节点本身，不拷贝键值
+    list_.splice(list_.begin(), list_, it->second);
+    return it->second->value_;
 }
 
-void LRUCache::Set(const std::string& key, const ByteView& value) {
-    std::lock_guard lock{mtx_};
-    if (cache_.find(key) != cache_.end()) {
-        // remove old
-        auto ele = cache_[key];
-        bytes_ += value.Len() - ele->value_.Len();
-        list_.erase(ele);
-    } else {
-        bytes_ += key.size() + value.Len();
+void LRUCache::Set(const std::string& key, const CacheValue& value) {
+    std::vector<std::pair<std::string, CacheValue>> evicted;
+    {
+        std::lock_guard lock{mtx_};
+        SetLocked(key, value);
+        // 容量超限时，从最久未使用的一端逐条淘汰
+        while (max_bytes_ != 0 && bytes_ > max_bytes_ && !list_.empty()) {
+            evicted.push_back(PopOldestLocked());
+        }
     }
-    // insert new
-    list_.emplace_front(key, value);
-    cache_[key] = list_.begin();
-
-    // 当 LRUCache 中还有缓存时，如果此时 LRUCache 中的容量超过规定大小，就不断将最久未使用的缓存淘汰
-    while (max_bytes_ != 0 && bytes_ > max_bytes_ && !list_.empty()) {
-        RemoveOldest();
+    for (auto& e : evicted) {
+        NotifyEvicted(std::move(e));
     }
 }
 
 void LRUCache::Delete(const std::string& key) {
-    std::lock_guard lock{mtx_};
-    if (cache_.find(key) == cache_.end()) {
-        return;
+    std::optional<std::pair<std::string, CacheValue>> evicted;
+    {
+        std::lock_guard lock{mtx_};
+        auto it = cache_.find(key);
+        if (it == cache_.end()) {
+            return;
+        }
+        bytes_ -= static_cast<int64_t>(key.size()) + it->second->value_.Len();
+        evicted = std::make_pair(key, std::move(it->second->value_));
+        list_.erase(it->second);
+        cache_.erase(it);
     }
-    auto elem_iter = cache_[key];
-    auto [_, value] = *elem_iter;
-    list_.erase(elem_iter);
-    cache_.erase(key);
-    bytes_ -= key.size() + value.Len();
-    if (evicted_func_) {
-        evicted_func_(key, value);
+    if (evicted) {
+        NotifyEvicted(std::move(*evicted));
     }
 }
 
 void LRUCache::RemoveOldest() {
-    if (list_.empty()) {
-        return;
+    std::optional<std::pair<std::string, CacheValue>> evicted;
+    {
+        std::lock_guard lock{mtx_};
+        if (!list_.empty()) {
+            evicted = PopOldestLocked();
+        }
     }
-    auto [key, value] = list_.back();
+    if (evicted) {
+        NotifyEvicted(std::move(*evicted));
+    }
+}
+
+void LRUCache::SetLocked(const std::string& key, const CacheValue& value) {
+    auto it = cache_.find(key);
+    if (it != cache_.end()) {
+        bytes_ += value.Len() - it->second->value_.Len();
+        list_.erase(it->second);
+    } else {
+        bytes_ += static_cast<int64_t>(key.size()) + value.Len();
+    }
+    list_.emplace_front(key, value);
+    cache_[key] = list_.begin();
+}
+
+auto LRUCache::PopOldestLocked() -> std::pair<std::string, CacheValue> {
+    auto& back = list_.back();
+    bytes_ -= static_cast<int64_t>(back.key_.size()) + back.value_.Len();
+    // 先拷贝 key 再移出 value：cache_ 的擦除需要完整的 key
+    std::string key = back.key_;
+    CacheValue value = std::move(back.value_);
     cache_.erase(key);
     list_.pop_back();
-    bytes_ -= key.size() + value.Len();
+    return {std::move(key), std::move(value)};
+}
+
+void LRUCache::NotifyEvicted(std::pair<std::string, CacheValue> evicted) {
     if (evicted_func_) {
-        evicted_func_(key, value);
+        evicted_func_(std::move(evicted.first), std::move(evicted.second));
     }
 }
 

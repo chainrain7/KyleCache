@@ -54,7 +54,7 @@ inline auto WithTLS(const std::string& certFile, const std::string& keyFile) -> 
 class KyleCacheServer final : public pb::KyleCache::Service {
 public:
     KyleCacheServer(const std::string& addr, const std::string& svc_name, ServerOptions opts = ServerOptions{});
-    ~KyleCacheServer() = default;
+    ~KyleCacheServer() override = default;
 
     auto Get(grpc::ServerContext* context, const pb::Request* request, pb::GetResponse* response)
         -> grpc::Status override;
@@ -68,25 +68,25 @@ public:
     auto Invalidate(grpc::ServerContext* context, const pb::Request* request, pb::InvalidateResponse* response)
         -> grpc::Status override;
 
+    auto Stats(grpc::ServerContext* context, const pb::StatsRequest* request, pb::StatsResponse* response)
+        -> grpc::Status override;
+
     void Start();
 
     void Stop();
 
 private:
-    // Helper for loading TLS credentials
+    // Load TLS credentials from PEM files
     auto LoadTLSCredentials(const std::string& cert_file, const std::string& key_file)
         -> std::shared_ptr<grpc::ServerCredentials>;
 
 private:
     std::string addr_;
     std::string svc_name_;
+    std::string node_id_;  // 注册到 etcd 的对外地址
 
     std::unique_ptr<grpc::Server> grpc_server_;
     std::unique_ptr<EtcdRegistry> etcd_register_;
-
-    std::atomic<bool> is_stop_;
-
-    ServerOptions opts_;
 };
 
 }  // namespace kylecache

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          python -m pip install --upgrade pip
+          pip install conan==2.16.1
+
+      - name: Install dependencies (conan)
+        run: |
+          conan profile detect --force
+          conan install . --build=missing -s build_type=Release
+
+      - name: Configure and build
+        run: |
+          cmake -DCMAKE_TOOLCHAIN_FILE=build/Release/generators/conan_toolchain.cmake \
+                -DCMAKE_BUILD_TYPE=Release -S . -B build -G Ninja
+          cmake --build build -j
+
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Benchmark smoke run
+        run: ./bin/bench_cache

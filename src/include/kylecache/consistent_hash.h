@@ -29,12 +29,17 @@ struct HashConfig {
     std::function<uint32_t(const std::string&)> hash_func;
     // 负载均衡阈值，超过此值触发虚拟节点调整
     double load_balance_threshold;
+    // 是否启用负载自均衡。注意：动态调整虚拟节点会改变 key -> 节点的映射，
+    // 对缓存这类依赖路由稳定性的场景通常应保持关闭（各客户端独立调整
+    // 还会造成同一 key 被不同客户端路由到不同节点）。
+    bool enable_load_balance;
 };
 
 // DefaultConfig 默认配置
 const HashConfig kDefaultConfig = {
     10,   10, 200, Crc32IEEE,
     0.25,  // 25% 的负载不均衡度触发调整
+    false  // 负载自均衡默认关闭
 };
 
 // Map 一致性哈希实现
@@ -46,6 +51,9 @@ public:
     // 析构函数，确保负载均衡器线程正确停止
     ~ConsistentHashMap();
 
+    ConsistentHashMap(const ConsistentHashMap&) = delete;
+    auto operator=(const ConsistentHashMap&) -> ConsistentHashMap& = delete;
+
     // Add 添加节点
     // 返回 true 表示成功，false 表示失败
     bool Add(const std::vector<std::string>& nodes);
@@ -54,8 +62,12 @@ public:
     // 返回 true 表示成功，false 表示失败
     bool Remove(const std::string& node);
 
-    // Get 获取节点
+    // Get 获取 key 所属的节点；环为空或 key 为空时返回 ""
     auto Get(const std::string& key) -> std::string;
+
+    // GetN 沿哈希环顺时针返回 key 的前 n 个不同候选节点（用于故障转移），
+    // 环为空或 key 为空时返回空 vector
+    auto GetN(const std::string& key, int n) -> std::vector<std::string>;
 
     // GetStats 获取负载统计信息
     auto GetStats() -> std::unordered_map<std::string, double>;

@@ -10,23 +10,47 @@
 #include <fmt/core.h>
 #include <spdlog/spdlog.h>
 #include <etcd/KeepAlive.hpp>
-#include <etcd/v3/Transaction.hpp>
 
 namespace kylecache {
 
+EtcdRegistry::~EtcdRegistry() {
+    is_stop_ = true;
+    if (keepalive_thread_.joinable()) {
+        keepalive_thread_.join();
+    }
+    // 不在这里撤销租约：租约到期后 etcd 会自动删除服务键。
+    // 需要立即下线的场景应由调用方显式 Unregister()。
+}
+
 bool EtcdRegistry::Register(const std::string& svc_name, std::string addr) {
-    std::string local_ip = GetLocalIP();
-    if (local_ip.empty()) {
-        spdlog::error("Failed to get local IP");
+    svc_name_ = svc_name;
+    addr_ = std::move(addr);
+    if (!DoRegister()) {
         return false;
     }
-    if (!addr.empty() && addr[0] == ':') {
-        addr = local_ip + addr;
+    keepalive_thread_ = std::thread{[this] { this->KeepAliveLoop(); }};
+    return true;
+}
+
+bool EtcdRegistry::DoRegister() {
+    // 地址以 ':' 开头（如 ":8001"）时补上本机 IP；拿不到本机 IP 则退回环回地址
+    std::string advertise = addr_;
+    if (!advertise.empty() && advertise[0] == ':') {
+        std::string local_ip = GetLocalIP();
+        if (local_ip.empty()) {
+            local_ip = "127.0.0.1";
+        }
+        advertise = local_ip + advertise;
     }
-    key_ = "/services/" + svc_name + "/" + addr;
+    if (advertise.empty()) {
+        spdlog::error("Failed to build advertise address for service [{}]", svc_name_);
+        return false;
+    }
+    key_ = "/services/" + svc_name_ + "/" + advertise;
+    advertised_addr_ = advertise;
 
     // 创建租约
-    auto lease_resp = etcd_client_->leasegrant(10).get();
+    auto lease_resp = etcd_client_->leasegrant(kLeaseTtlSec).get();
     if (!lease_resp.is_ok()) {
         spdlog::error("Failed to create lease: {}", lease_resp.error_message());
         return false;
@@ -34,15 +58,14 @@ bool EtcdRegistry::Register(const std::string& svc_name, std::string addr) {
     lease_id_ = lease_resp.value().lease();
 
     // 注册服务
-    auto is_ok = etcd_client_->put(key_, addr, lease_id_).get();
-    if (!is_ok.is_ok()) {
-        spdlog::error("Failed to register [{}] to etcd: {}", key_, is_ok.error_message());
+    auto put_resp = etcd_client_->put(key_, advertise, lease_id_).get();
+    if (!put_resp.is_ok()) {
+        spdlog::error("Failed to register [{}] to etcd: {}", key_, put_resp.error_message());
+        lease_id_ = 0;
         return false;
     }
 
-    // 启动续约线程
-    keepalive_thread_ = std::thread{[this] { this->KeepAliveLoop(); }};
-    spdlog::info("Etcd Service registered: {}", key_);
+    spdlog::info("Etcd service registered: {} (lease {})", key_, lease_id_);
     return true;
 }
 
@@ -51,13 +74,16 @@ void EtcdRegistry::Unregister() {
     if (keepalive_thread_.joinable()) {
         keepalive_thread_.join();
     }
-    if (lease_id_ > 0) {
-        auto is_ok = etcd_client_->leaserevoke(lease_id_).wait();
-        if (!is_ok) {
-            throw std::runtime_error(fmt::format("[kylecache] Failed to revoke lease: {}", lease_id_));
+    if (lease_id_ != 0) {
+        // 注意：这里必须检查 etcd 响应的状态，且不能抛异常——
+        // 本函数会从信号处理与析构路径被调用
+        auto resp = etcd_client_->leaserevoke(lease_id_).get();
+        if (!resp.is_ok()) {
+            spdlog::error("Failed to revoke lease {}: {}", lease_id_, resp.error_message());
         } else {
             spdlog::debug("Lease {} revoked successfully", lease_id_);
         }
+        lease_id_ = 0;
     }
     spdlog::info("Service unregistered: {}", key_);
 }
@@ -85,21 +111,25 @@ auto EtcdRegistry::GetLocalIP() -> std::string {
 
 void EtcdRegistry::KeepAliveLoop() {
     while (!is_stop_) {
-        etcd::KeepAlive keepalive{*etcd_client_, 10, lease_id_};
         try {
-            keepalive.Check();
+            // KeepAlive 对象存活期间自动续约；Check() 在续约失败时抛出异常
+            etcd::KeepAlive keepalive{*etcd_client_, kLeaseTtlSec, lease_id_};
+            while (!is_stop_) {
+                keepalive.Check();
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
         } catch (const std::exception& e) {
-            spdlog::error("Keepalive exception: {}", e.what());
-            keepalive.Cancel();
-        } catch (...) {
-            spdlog::error("Keepalive unknown exception");
-            keepalive.Cancel();
+            spdlog::error("KeepAlive failed for lease {}: {}", lease_id_, e.what());
+            if (!is_stop_) {
+                // 原租约已不可用，服务键即将（或已经）从 etcd 消失，
+                // 必须用新租约重新注册，否则节点会静默掉线
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                if (!is_stop_ && DoRegister()) {
+                    spdlog::info("Re-registered with new lease {}", lease_id_);
+                }
+            }
         }
-
-        // 等待间隔（租约时间的1/3）
-        std::this_thread::sleep_for(std::chrono::seconds(3));
     }
-
     spdlog::debug("KeepAlive loop exited for lease {}", lease_id_);
 }
 

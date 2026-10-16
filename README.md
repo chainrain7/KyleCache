@@ -1,5 +1,7 @@
 # KyleCache
 
+[![CI](https://github.com/chainrain7/KyleCazche/actions/workflows/ci.yml/badge.svg)](https://github.com/chainrain7/KyleCazche/actions/workflows/ci.yml)
+
 KyleCache 是一个类似 Memcached 的分布式缓存系统，采用客户端-服务器架构。系统基于一致性哈希算法实现数据分片和负载均衡，使用 LRU（最近最少使用）缓存淘汰算法。节点间通过 gRPC 进行高效通信，基于 etcd 实现服务注册与发现。
 
 与 Memcached 类似，KyleCache 提供了独立的客户端 SDK，应用程序通过 SDK 直接与缓存集群交互。同时提供了 HTTP 网关作为示例，展示如何基于 SDK 构建 REST API 服务。该项目使用 Conan 作为包管理工具，使用 CMake 作为构建工具。
@@ -62,11 +64,13 @@ KyleCache 采用客户端-服务器架构，类似于 Memcached：
 4. 若缓存未命中，从数据源加载（通过 Getter 回调）
 5. 将数据存入本地缓存并返回给客户端
 
-**SET 请求（强一致性）：**
-1. 客户端/网关通过一致性哈希确定主节点
-2. 向主节点发送 gRPC Set 请求写入数据
-3. 并发向其他所有节点发送 Invalidate 请求（缓存失效）
-4. 所有节点完成后返回成功
+**SET 请求（写失效，最终一致）：**
+1. 客户端/网关通过一致性哈希确定目标节点
+2. 向目标节点发送 gRPC Set 请求写入数据（失败则沿哈希环故障转移到下一节点）
+3. 向其余所有节点并行发送 Invalidate 请求（缓存失效，单节点失败自动重试）
+4. 所有失效广播完成后返回成功；任一节点最终失败则整体返回失败
+
+> 注意：Set 采用"写失效"而非强一致协议——在失效广播完成前，其他节点可能短暂读到旧值；若某节点的失效广播彻底失败，该节点会残留旧值，直至该 key 被再次写入或删除。
 
 **DELETE 请求：**
 1. 客户端/网关向所有节点广播 Delete 请求
@@ -96,7 +100,6 @@ KyleCache 的设计灵感来源于：
 │   │   └── client_sdk.cpp
 │   ├── consistent_hash/   # 一致性哈希
 │   ├── group/             # 缓存组（逻辑命名空间）
-│   ├── peer/              # 节点间通信（gRPC 客户端）
 │   ├── server/            # gRPC 服务器
 │   ├── registry/          # etcd 服务注册
 │   ├── proto/             # Protobuf 定义
@@ -105,10 +108,14 @@ KyleCache 的设计灵感来源于：
 │   └── main.cpp           # 缓存节点入口
 ├── example/
 │   └── http_gateway/      # HTTP 网关示例（基于 SDK）
-├── test/                  # 单元测试
+├── test/                  # 单元测试与基准测试
 │   ├── test_lru.cpp
 │   ├── test_consistent_hash.cpp
-│   └── test_group.cpp
+│   ├── test_group.cpp
+│   └── bench_cache.cpp    # 简易基准（LRU / 一致性哈希）
+├── scripts/
+│   └── e2e_test.sh        # docker compose 端到端测试
+├── .github/workflows/ci.yml  # CI：构建 + 单元测试 + 基准冒烟
 ├── CMakeLists.txt
 ├── conanfile.txt
 └── README.md
@@ -270,35 +277,38 @@ docker compose down
 独立的客户端库，提供与缓存集群交互的统一接口：
 
 ```cpp
-// 初始化客户端
+// 初始化客户端（第三个参数可选，用于调整超时/重试策略）
 KyleCacheClient client("http://127.0.0.1:2379", "kylecache");
 
 // 基本操作
 auto value = client.Get("group_name", "key");  // 获取缓存
-client.Set("group_name", "key", "value");      // 设置缓存
-client.Delete("group_name", "key");             // 删除缓存
+client.Set("group_name", "key", "value");      // 设置缓存（写失效）
+client.Delete("group_name", "key");            // 删除缓存（全节点广播）
+
+// 拉取各节点统计（回源次数、命中率、耗时等）
+auto stats = client.Stats("group_name");
 ```
 
 **核心功能：**
-- 自动服务发现（通过 etcd watch 实时更新节点列表）
-- 一致性哈希路由（智能选择目标节点）
-- 连接池管理（复用 gRPC 连接）
-- 强一致性保证（Set 时自动广播失效，Delete 时全节点删除）
+- 自动服务发现（etcd watch 实时更新节点列表，断线自动重连并全量同步）
+- 一致性哈希路由，目标节点不可用时沿哈希环故障转移
+- gRPC 连接按节点复用（连接池），所有 RPC 带超时
+- 写失效策略：Set 写入目标节点后并行向其余节点广播失效（单节点失败重试），Delete 并行广播所有节点
 
 ### 缓存节点 (Node Server)
 
 每个节点是独立的缓存服务器：
 
 **功能：**
-- 提供 gRPC 服务端接口（Get/Set/Delete/Invalidate）
+- 提供 gRPC 服务端接口（Get/Set/Delete/Invalidate/Stats）
 - 管理本地 LRU 缓存
-- 启动时自动注册到 etcd
+- 启动时以短租约注册到 etcd，靠后台线程续约；续约失败自动用新租约重新注册，节点不会从服务发现中静默消失
 - 响应客户端请求并执行缓存操作
 
 **内部组件：**
-- **Group**：缓存的逻辑命名空间，支持多租户隔离
-- **LRU Cache**：线程安全的本地缓存，自动淘汰最少使用数据
-- **SingleFlight**：防止缓存击穿，同一 key 的并发请求合并为一次加载
+- **Group**：缓存的逻辑命名空间，支持多租户隔离，内置原子统计计数器
+- **LRU Cache**：线程安全的本地缓存，自动淘汰最少使用数据（淘汰回调在锁外执行）
+- **SingleFlight**：防止缓存击穿，同一 key 的并发请求合并为一次加载；回源异常安全传播，不会留下卡死的等待者
 
 ### 一致性哈希
 
@@ -306,15 +316,15 @@ client.Delete("group_name", "key");             // 删除缓存
 
 - 虚拟节点机制确保负载均衡
 - 节点变化时最小化数据迁移
-- 支持动态负载调整
+- 支持按负载动态调整虚拟节点数，但默认关闭（动态调整会改变 key 到节点的映射，破坏缓存路由稳定性，仅在特殊场景开启）
 
 ### 服务注册与发现
 
 基于 etcd 实现：
 
-- 节点启动时注册自己的地址到 etcd
-- 客户端通过 etcd watch 实时感知节点变化
-- 节点下线时自动从集群中移除
+- 节点启动时注册自己的地址（自动补全本机 IP）到 etcd
+- 客户端通过 etcd watch 实时感知节点变化，watch 断开后指数退避重连并全量同步节点列表
+- 节点下线（租约过期）时自动从集群中移除
 
 ### HTTP 网关（可选）
 
@@ -336,19 +346,56 @@ curl http://127.0.0.1:9000/api/cache/default/Kevin
 # 输出：{"group":"test","key":"Kevin","value":"370"}⏎  
 ```
 
-2. Set  
+2. Set（支持表单 `-d 'value=xxx'`、JSON body `{"value":"xxx"}` 与原始 body 三种形式）
 
 ```sh
-$ curl -X POST http://127.0.0.1:9000/api/cache/default/Kevin -d 'value=1219'     
-# 输出：{"group":"test","key":"Kevin","success":true,"value":"value=1219"}⏎  
+$ curl -X POST http://127.0.0.1:9000/api/cache/default/Kevin -d 'value=1219'     
+# 输出：{"group":"test","key":"Kevin","success":true,"value":"1219"}⏎  
 ```
 
 3. Delete
 
 ```sh
-$ curl -X DELETE http://localhost:9000/api/cache/default/Kevin  
+$ curl -X DELETE http://localhost:9000/api/cache/default/Kevin  
 # 输出：{"deleted":true,"group":"test","key":"Kevin"}⏎  
 ```
+
+4. Stats（查看各节点上指定 group 的统计：回源次数、本地命中/未命中、回源耗时等）
+
+```sh
+$ curl http://127.0.0.1:9000/api/stats/default  
+# 输出：[{"group":"default","load_duration_ns":151500,"loader_errors":0,"loader_hits":1,"loads":1,"local_hits":2,"local_misses":1,"node":"192.168.1.10:8001"}, ...]⏎  
+```
+
+## 开发
+
+### 单元测试
+
+构建后通过 ctest 运行（覆盖 LRU、一致性哈希、缓存组/SingleFlight）：
+
+```sh
+ctest --test-dir build --output-on-failure
+```
+
+### 基准测试
+
+```sh
+./bin/bench_cache
+```
+
+输出 LRU Set/Get（命中与未命中）与一致性哈希路由的吞吐（ops/s）。
+
+### 端到端测试
+
+基于 docker compose 拉起 etcd + 3 节点 + 网关，走 REST API 验证 Set/Get/Delete/Stats 全链路：
+
+```sh
+bash scripts/e2e_test.sh
+```
+
+### CI
+
+GitHub Actions（`.github/workflows/ci.yml`）：Ubuntu 22.04 上 conan 安装依赖、构建、跑单元测试与基准冒烟。
 
 
 ## 许可证

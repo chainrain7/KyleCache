@@ -13,17 +13,16 @@
 
 namespace kylecache {
 
-using DataGetter = std::function<ByteViewOptional(const std::string& key)>;
+using DataGetter = std::function<CacheValueOptional(const std::string& key)>;
 
-struct GroupStatus {
-    std::atomic_int64_t loads;          // 加载次数
-    std::atomic_int64_t local_hits;     // 本地缓存命中次数
-    std::atomic_int64_t local_misses;   // 本地缓存未命中次数
-    std::atomic_int64_t peer_hits;      // 从对等节点获取成功次数
-    std::atomic_int64_t peer_misses;    // 从对等节点获取失败次数
-    std::atomic_int64_t loader_hits;    // 从加载器获取成功次数
-    std::atomic_int64_t loader_errors;  // 从加载器获取失败次数
-    std::atomic_int64_t load_duration;  // 加载总耗时（纳秒）};
+// 统计快照（普通值类型，通过 KyleCacheGroup::Stats() 获取）
+struct GroupStats {
+    int64_t loads = 0;             // 回源加载次数
+    int64_t local_hits = 0;        // 本地缓存命中次数
+    int64_t local_misses = 0;      // 本地缓存未命中次数
+    int64_t loader_hits = 0;       // 回源成功次数
+    int64_t loader_errors = 0;     // 回源失败次数
+    int64_t load_duration_ns = 0;  // 回源累计耗时（纳秒）
 };
 
 enum class SyncFlag {
@@ -43,6 +42,8 @@ public:
 
     auto operator=(const KyleCacheGroup& other) -> KyleCacheGroup& = delete;
 
+    // 手写移动语义：SingleFlight 内含 mutex 不可移动，
+    // 移动后的新对象使用全新的 SingleFlight 与计数器
     KyleCacheGroup(KyleCacheGroup&& other) {
         cache_ = std::move(other.cache_);
         name_ = std::move(other.name_);
@@ -56,18 +57,21 @@ public:
         return *this;
     }
 
-    auto Get(const std::string& key) -> ByteViewOptional;
+    auto Get(const std::string& key) -> CacheValueOptional;
 
-    bool Set(const std::string& key, ByteView b);
+    bool Set(const std::string& key, CacheValue b);
 
     bool Delete(const std::string& key);
 
     // 处理来自其他节点的失效请求
     bool InvalidateFromPeer(const std::string& key);
 
+    // 当前统计快照
+    auto Stats() const -> GroupStats;
+
 private:
-    auto Load(const std::string& key) -> ByteViewOptional;
-    auto LoadData(const std::string& key) -> ByteViewOptional;
+    auto Load(const std::string& key) -> CacheValueOptional;
+    auto LoadData(const std::string& key) -> CacheValueOptional;
 
 private:
     std::unique_ptr<LRUCache> cache_;
@@ -75,9 +79,19 @@ private:
     std::atomic<bool> is_close_{false};
     DataGetter getter_;
     SingleFlight loader_;
-    GroupStatus status_;
+
+    // 内部原子计数器（C++17 中 std::atomic 整型默认构造不初始化，必须显式置 0）
+    struct {
+        std::atomic_int64_t loads{0};
+        std::atomic_int64_t local_hits{0};
+        std::atomic_int64_t local_misses{0};
+        std::atomic_int64_t loader_hits{0};
+        std::atomic_int64_t loader_errors{0};
+        std::atomic_int64_t load_duration_ns{0};
+    } status_;
 };
 
+// 创建（或覆盖同名）全局缓存组；getter 为空时抛出 std::invalid_argument
 auto MakeCacheGroup(const std::string& name, int64_t bytes, DataGetter getter) -> KyleCacheGroup&;
 auto GetCacheGroup(const std::string& name) -> KyleCacheGroup*;
 
