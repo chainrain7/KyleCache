@@ -12,8 +12,24 @@
 DEFINE_int32(http_port, 9000, "HTTP服务端口");
 DEFINE_string(etcd_endpoints, "http://127.0.0.1:2379", "etcd地址");
 DEFINE_string(service_name, "kylecache", "缓存服务名称");
+DEFINE_string(log_level, "info", "日志级别，可选值：trace, debug, info, warn, error, critical");
 
 using namespace kylecache;
+
+namespace {
+
+spdlog::level::level_enum ParseLogLevel(const std::string& level) {
+    if (level == "trace") return spdlog::level::trace;
+    if (level == "debug") return spdlog::level::debug;
+    if (level == "info") return spdlog::level::info;
+    if (level == "warn" || level == "warning") return spdlog::level::warn;
+    if (level == "error") return spdlog::level::err;
+    if (level == "critical") return spdlog::level::critical;
+    spdlog::warn("Unknown log level [{}], fallback to info", level);
+    return spdlog::level::info;
+}
+
+}  // namespace
 
 class HttpGateway {
 public:
@@ -145,7 +161,7 @@ private:
 int main(int argc, char** argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-    spdlog::set_level(spdlog::level::debug);
+    spdlog::set_level(ParseLogLevel(FLAGS_log_level));
     spdlog::set_pattern("[http-gateway][%^%l%$] %v");
 
     try {
