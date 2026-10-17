@@ -37,9 +37,11 @@ KyleCacheServer::KyleCacheServer(const std::string& addr, const std::string& svc
         if (i > 0) endpoints += ",";
         endpoints += opts_.etcd_endpoints[i];
     }
+    // 对外注册地址：未显式指定时使用绑定地址本身
+    const std::string advertise = opts_.advertise_addr.empty() ? addr_ : opts_.advertise_addr;
     // 创建etcd注册器
     etcd_register_ = std::make_unique<EtcdRegistry>(endpoints);
-    if (!etcd_register_->Register(svc_name_, addr_)) {
+    if (!etcd_register_->Register(svc_name_, advertise)) {
         throw std::runtime_error("[kylecache] Failed to register service with etcd");
     }
     node_id_ = etcd_register_->advertised_addr();

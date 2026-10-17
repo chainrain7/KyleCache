@@ -385,6 +385,31 @@ ctest --test-dir build --output-on-failure
 
 输出 LRU Set/Get（命中与未命中）与一致性哈希路由的吞吐（ops/s）。
 
+实测（WSL2 Ubuntu-22.04，i7-14650HX 24 核，Release 构建）：
+
+- LRU 引擎（单线程）：Get 命中 **1644 万 ops/s**、Get 未命中 1869 万 ops/s、Set 1147 万 ops/s（value 128B，见 `test/bench_cache.cpp`）
+- 一致性哈希路由：1146 万 ops/s（10 节点 × 10 虚拟节点）
+
+### 负载测试
+
+对完整集群（etcd + 3 缓存节点 + HTTP 网关，同机部署）压测 REST API：
+
+```sh
+pip3 install aiohttp
+python3 scripts/load_test.py
+```
+
+实测（同上环境，aiohttp 客户端，每场景 15s）：
+
+| 场景 | 吞吐 | P50 | P95 |
+|---|---|---|---|
+| GET 命中（c=50） | 8131 req/s | 2.0ms | 3.1ms |
+| GET 命中（c=200） | 7605 req/s | 2.1ms | 3.2ms |
+| GET 未命中+回源（c=50） | 7884 req/s | 2.1ms | 3.3ms |
+| SET+并行广播失效（c=50） | 5181 req/s | 3.3ms | 4.5ms |
+
+> 排障记录：网关最初只有约 400 req/s（P50 44ms）。排查发现 cpp-httplib 默认不设置 `TCP_NODELAY`，keepalive 长连接上的小响应包会被 Nagle 算法与延迟 ACK 组合卡出约 40ms 的固定延迟；对网关开启 `CPPHTTPLIB_TCP_NODELAY` 后吞吐提升约 20 倍。
+
 ### 端到端测试
 
 基于 docker compose 拉起 etcd + 3 节点 + 网关，走 REST API 验证 Set/Get/Delete/Stats 全链路：

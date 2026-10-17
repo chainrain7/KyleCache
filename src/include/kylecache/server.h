@@ -22,6 +22,10 @@ struct ServerOptions {
     bool tls;
     std::string cert_file;
     std::string key_file;
+    // 注册到 etcd 的对外地址。留空时使用 addr 本身；
+    // 设为 ":port" 这类形式时由注册器自动补全本机 IP。
+    // addr 绑定 0.0.0.0 而对外注册真实 IP 的典型场景下需要它。
+    std::string advertise_addr;
 
     // Default constructor to set default values
     ServerOptions()
@@ -87,6 +91,8 @@ private:
 
     std::unique_ptr<grpc::Server> grpc_server_;
     std::unique_ptr<EtcdRegistry> etcd_register_;
+
+    ServerOptions opts_;
 };
 
 }  // namespace kylecache

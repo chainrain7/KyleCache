@@ -64,16 +64,18 @@ int main(int argc, char** argv) {
         return std::nullopt;
     });
 
-    // 以 ":port" 形式注册，EtcdRegistry 会自动补上本机 IP，保证跨机器可达
-    const std::string addr = ":" + std::to_string(FLAGS_port);
+    // 绑定 0.0.0.0 接受任意来源连接；对外以 ":port" 注册，
+    // EtcdRegistry 会自动补上默认路由网卡的 IP，保证跨机器可达
+    const std::string bind_addr = "0.0.0.0:" + std::to_string(FLAGS_port);
     const std::string service_name = "kylecache";
-    spdlog::info("[node{}] start at: {}", FLAGS_node, addr);
+    spdlog::info("[node{}] start at: {}", FLAGS_node, bind_addr);
 
     try {
         // 创建节点，同时注册到etcd
         ServerOptions opts;
         opts.etcd_endpoints = {FLAGS_etcd_endpoints};
-        auto node = std::make_unique<KyleCacheServer>(addr, service_name, opts);
+        opts.advertise_addr = ":" + std::to_string(FLAGS_port);
+        auto node = std::make_unique<KyleCacheServer>(bind_addr, service_name, opts);
         spdlog::info("[node{}] server created successfully", FLAGS_node);
 
         // 注册 Ctrl+C 信号处理器用来优雅关闭服务（在启动前注册，避免启动期间无法退出）
