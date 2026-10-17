@@ -34,11 +34,14 @@ KyleCache 是一个类似 Memcached 的分布式缓存系统，采用客户端-�
 
 该项目使用 [conan](https://conan.io/) 作为依赖管理工具，在配置该项目时需确保当前系统上安装了 conan。
 
-> 项目 v2 版本不使用 vcpkg 了是因为其无法下载 etcd-cpp-apiv3，为了方便管理第三方库就只使用了 conan。
+> 选择 conan 而非 vcpkg 的原因：vcpkg 没有维护 etcd-cpp-apiv3 的移植，conan 的中央仓库可以直接提供全部依赖。
 
 ## 架构设计
 
 KyleCache 采用客户端-服务器架构，类似于 Memcached：
+
+![架构图](image.png)
+
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
@@ -137,7 +140,7 @@ KyleCache 的设计灵感来源于：
 
 ## 本地运行
 
-项目中使用的第三方库 `etcd-cpp-apiv3` 中依赖的 `libsystemd/255`，而这个版本的 libsystemd 在高版本的 Linux Kernel 上有一个 bug：
+项目中使用的第三方库 `etcd-cpp-apiv3` 依赖 `libsystemd/255`，该版本在较新的 `linux-libc-dev` 内核头文件（>= 6.9 的头文件定义）下有一个已知 bug：
 
 ```plain
 Unknown filesystems defined in kernel headers:
@@ -146,9 +149,9 @@ Filesystem found in kernel header but not in filesystems-gperf.gperf: BCACHEFS_S
 Filesystem found in kernel header but not in filesystems-gperf.gperf: PID_FS_MAGIC
 ```
 
-不过后面这个 bug 修复了，可以看[这里](https://lore.kernel.org/buildroot/ZmGjGvRCN3GwWFhp@landeda/T/)。而我们使用的 Conan 仓库中 etcd-cpp-apiv3 的最新版本还是依赖了 libsystemd/255。
+该 bug 上游已[修复](https://lore.kernel.org/buildroot/ZmGjGvRCN3GwWFhp@landeda/T/)，但 Conan 仓库中 etcd-cpp-apiv3 目前仍依赖 libsystemd/255。
 
-因此如果继续使用 Conan 作为包管理器的话，就需要使用低版本的内核（6.8及以下），这里我使用的是 Ubuntu22.04，内核版本为 5.15，可以使用虚拟机或者 Docker。项目给出了 Dockerfile，能比较方便的构建出镜像，这里在下一章会有说明。
+因此判断标准是**构建环境安装的内核头文件版本**（`linux-libc-dev`），而非运行内核：Ubuntu 22.04（头文件 5.15）可以正常构建；本项目亦在内核 6.18 的 WSL2 + Ubuntu 22.04 环境下构建验证通过。如果构建报上述错误，请使用 Docker（见下一章）或降低构建环境的头文件版本。
 
 ### 项目构建
 
@@ -350,21 +353,21 @@ auto stats = client.Stats("group_name");
 
 ```sh
 curl http://127.0.0.1:9000/api/cache/default/Kevin  
-# 输出：{"group":"test","key":"Kevin","value":"370"}⏎  
+# 输出：{"group":"default","key":"Kevin","value":"370"}⏎  
 ```
 
 2. Set（支持表单 `-d 'value=xxx'`、JSON body `{"value":"xxx"}` 与原始 body 三种形式）
 
 ```sh
 $ curl -X POST http://127.0.0.1:9000/api/cache/default/Kevin -d 'value=1219'     
-# 输出：{"group":"test","key":"Kevin","success":true,"value":"1219"}⏎  
+# 输出：{"group":"default","key":"Kevin","success":true,"value":"1219"}⏎  
 ```
 
 3. Delete
 
 ```sh
 $ curl -X DELETE http://localhost:9000/api/cache/default/Kevin  
-# 输出：{"deleted":true,"group":"test","key":"Kevin"}⏎  
+# 输出：{"deleted":true,"group":"default","key":"Kevin"}⏎  
 ```
 
 4. Stats（查看各节点上指定 group 的统计：回源次数、本地命中/未命中、回源耗时等）
