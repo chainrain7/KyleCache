@@ -1,6 +1,13 @@
 # KyleCache
 
-[![CI](https://github.com/chainrain7/KyleCazche/actions/workflows/ci.yml/badge.svg)](https://github.com/chainrain7/KyleCazche/actions/workflows/ci.yml)
+[![CI](https://github.com/chainrain7/KyleCache/actions/workflows/ci.yml/badge.svg)](https://github.com/chainrain7/KyleCache/actions/workflows/ci.yml)
+
+## ✨ 亮点速览
+
+- **引擎性能**：LRU Get 命中 1644 万 ops/s / Set 1147 万 ops/s（128B value，单线程基准）
+- **集群吞吐**：3 节点 + 网关，GET 命中 **8131 req/s**（P50 2.0ms / P95 3.1ms）
+- **真实排障**：压测定位网关 394 req/s 系 Nagle 算法卡小包（ss -tni 实锤），启用 TCP_NODELAY 后吞吐 **×20**
+- **工程质量**：32 项单元测试全过，GitHub Actions CI（构建 + 单测 + 基准冒烟），端到端集群测试脚本
 
 KyleCache 是一个类似 Memcached 的分布式缓存系统，采用客户端-服务器架构。系统基于一致性哈希算法实现数据分片和负载均衡，使用 LRU（最近最少使用）缓存淘汰算法。节点间通过 gRPC 进行高效通信，基于 etcd 实现服务注册与发现。
 
